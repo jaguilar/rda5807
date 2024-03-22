@@ -16,4 +16,4 @@ the actual receiver I have is a RDA5807P, not M. I have no idea if this would
 change how the receiver is programmed.
 
 Anyway, maybe this will be helpful to someone. It was interesting at least to learn
-how to interact with I2C via Linux!s
+how to interact with I2C via Linux!
