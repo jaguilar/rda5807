@@ -11,6 +11,12 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "absl/base/attributes.h"
+#include "absl/base/optimization.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_format.h"
+
 constexpr uint32_t addr_5807_random_access = 0x11;
 
 namespace rda5807 {
@@ -19,7 +25,7 @@ enum class Register : uint8_t {
   kChipId = 0x00,
   kControl = 0x02,
   kChannel = 0x03,
-  kThreshold = 0x05,
+  kVolumeAndSeek = 0x05,
 };
 
 enum class Band {
@@ -27,6 +33,219 @@ enum class Band {
   kJp = 1,
   kWorld = 2,
   kEastEurope = 3,
+};
+
+struct Reg0 {
+  uint8_t chip_id;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const Reg0& reg0) {
+    absl::Format(&sink, "chip_id: %02x", reg0.chip_id);
+  }
+
+  static Reg0 Parse(uint16_t x) {
+    return Reg0{.chip_id = static_cast<uint8_t>((x >> 8) & 0xff)};
+  }
+};
+
+struct Reg2 {
+  bool enable = false;
+  bool soft_reset = false;
+  bool new_method = false;
+  bool rds_enable = false;
+  uint8_t clock_mode =
+      0;  // See datasheet. My impl doesn't use a reference clock.
+  bool seek_wrap = false;
+  bool seek = false;
+  bool seek_up = false;
+  bool reference_clock_direct_input = false;
+  bool reference_clock_noncalibrate = false;
+  bool bass_boost = false;
+  bool mono = false;
+  bool disable_mute = false;
+  bool dhiz = false;
+
+  static Reg2 Parse(uint16_t x) {
+    return {
+        .enable = (x & (1 << 0)) != 0,
+        .soft_reset = (x & (1 << 1)) != 0,
+        .new_method = (x & (1 << 2)) != 0,
+        .rds_enable = (x & (1 << 3)) != 0,
+        .clock_mode = static_cast<uint8_t>((x >> 4) & 0b111),
+        .seek_wrap = (x & (1 << 7)) == 0,
+        .seek = (x & (1 << 8)) != 0,
+        .seek_up = (x & (1 << 9)) != 0,
+        .reference_clock_direct_input = (x & (1 << 10)) != 0,
+        .reference_clock_noncalibrate = (x & (1 << 11)) != 0,
+        .bass_boost = (x & (1 << 12)) != 0,
+        .mono = (x & (1 << 13)) != 0,
+        .disable_mute = (x & (1 << 14)) != 0,
+        .dhiz = (x & (1 << 15)) != 0,
+    };
+  }
+
+  uint16_t Serialize() const {
+    uint16_t x = 0;
+    x |= enable << 0;
+    x |= soft_reset << 1;
+    x |= new_method << 2;
+    x |= rds_enable << 3;
+    x |= clock_mode << 4;
+    x |= !seek_wrap << 7;
+    x |= seek << 8;
+    x |= seek_up << 9;
+    x |= reference_clock_direct_input << 10;
+    x |= reference_clock_noncalibrate << 11;
+    x |= bass_boost << 12;
+    x |= mono << 13;
+    x |= disable_mute << 14;
+    x |= dhiz << 15;
+    return x;
+  }
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const Reg2& reg2) {
+    absl::Format(&sink,
+                 "enable: %d, soft_reset: %d, new_method: %d, "
+                 "rds_enable: %d, clock_mode: %d, seek_wrap: %d, seek: %d, "
+                 "seek_up: %d, reference_clock_direct_input: %d, "
+                 "reference_clock_noncalibrate: %d, bass_boost: %d, mono: "
+                 "%d, disable_mute: %d, dhiz: %d",
+                 reg2.enable, reg2.soft_reset, reg2.new_method, reg2.rds_enable,
+                 reg2.clock_mode, reg2.seek_wrap, reg2.seek, reg2.seek_up,
+                 reg2.reference_clock_direct_input,
+                 reg2.reference_clock_noncalibrate, reg2.bass_boost, reg2.mono,
+                 reg2.disable_mute, reg2.dhiz);
+  }
+};
+
+struct Reg3 {
+  enum ChannelSpacing {
+    k100Khz = 0,
+    k200Khz = 1,
+    k50Khz = 2,
+    k25Khz = 3,
+  };
+  ChannelSpacing spacing = k100Khz;
+
+  static int64_t SpaceKhz(ChannelSpacing spacing) {
+    switch (spacing) {
+      case k100Khz:
+        return 100;
+      case k200Khz:
+        return 200;
+      case k50Khz:
+        return 50;
+      case k25Khz:
+        return 25;
+    }
+    ABSL_UNREACHABLE();
+  }
+  int64_t SpaceKhz() const { return Reg3::SpaceKhz(spacing); }
+
+  enum Band {
+    kUs = 0,
+    kJp = 1,
+    kWorld = 2,
+    kEastEurope = 3,
+  };
+  Band band = kUs;
+
+  int64_t BandBaseKhz() const {
+    switch (band) {
+      case kUs:
+        return 87000;
+      case kJp:
+        ABSL_FALLTHROUGH_INTENDED;
+      case kWorld:
+        return 76000;
+      case 3:
+        return 65000;
+    }
+    printf("Illegal band index: %d\n", static_cast<int>(band));
+    exit(1);
+  }
+
+  bool tune = false;
+  bool direct_mode = false;
+
+  // band base + channel * spacing. Up to 9 bits.
+  uint16_t channel = 0;
+
+  static Reg3 Parse(uint16_t x) {
+    Reg3 r{
+        .spacing = static_cast<ChannelSpacing>(x & 0b11),
+        .band = static_cast<Band>((x >> 2) & 0b11),
+        .tune = (x & (1 << 4)) != 0,
+        .direct_mode = (x & (1 << 5)) != 0,
+        .channel = static_cast<uint16_t>(x >> 6),
+    };
+    CHECK_LE(r.channel, 0b111111111);
+    return r;
+  }
+
+  uint16_t Serialize() const {
+    uint16_t x = 0;
+    x |= spacing;
+    x |= band << 2;
+    x |= tune << 4;
+    x |= direct_mode << 5;
+    x |= channel << 6;
+    return x;
+  }
+
+  int64_t KHz() const { return BandBaseKhz() + channel * SpaceKhz(); }
+
+  template <typename T>
+  friend void AbslStringify(T& sink, const Reg3& reg3) {
+    absl::Format(&sink,
+                 "spacing: %d (%dkHz), band: %d, tune: %d, direct_mode: %d, "
+                 "channel: %d (%d kHz)",
+                 reg3.spacing, reg3.SpaceKhz(), reg3.band, reg3.tune,
+                 reg3.direct_mode, reg3.channel, reg3.KHz());
+  }
+
+  void SetChannel(Band band, uint64_t khz) {
+    khz -= BandBaseKhz();
+    printf("khzoffset: %lu\n", khz);
+
+    // Use the widest spacing that exactly matches the target frequency,
+    // else 25.
+    ChannelSpacing chosen_spacing;
+    for (ChannelSpacing i : {k200Khz, k100Khz, k50Khz, k25Khz}) {
+      chosen_spacing = i;
+      if (!(khz % SpaceKhz(i))) break;
+    }
+    const int64_t chosen_spacing_khz = SpaceKhz(chosen_spacing);
+    absl::PrintF("space_khz: %d [%d kHz]\n", chosen_spacing,
+                 chosen_spacing_khz);
+
+    khz += chosen_spacing_khz / 2;  // Round rather than truncate.
+    uint16_t channel = khz / chosen_spacing_khz;
+    absl::PrintF("chan: %d\n", channel);
+
+    // Construct the new tune value.
+    this->spacing = chosen_spacing;
+    this->channel = channel;
+  }
+};
+
+struct Reg5 {
+  uint8_t volume = 0b1111;
+
+  static Reg5 Parse(uint16_t x) {
+    return {.volume = static_cast<uint8_t>(x & 0b1111)};
+  }
+
+  uint16_t Serialize() const {
+    CHECK_LE(volume, 0b1111);
+    return volume & 0b1111;
+  }
+
+  template <typename T>
+  friend void AbslStringify(T& sink, const Reg5& reg5) {
+    absl::Format(&sink, "volume: %d", reg5.volume);
+  }
 };
 
 class I2CConnection {
@@ -42,7 +261,7 @@ class I2CConnection {
 
   ~I2CConnection() { close(fd_); }
 
-  uint16_t ReadRegister(Register r) {
+  uint16_t ReadRegister(Register r) const {
     uint8_t buf[1] = {static_cast<uint8_t>(r)};
     uint8_t res[2] = {0, 0};
     std::array<i2c_msg, 2> msgs{i2c_msg{
@@ -103,126 +322,50 @@ class I2CConnection {
     SetRegister(Register::kControl, val);
   }
 
-  void SetMute(bool mute) {
-    constexpr int mutebit = 14;
-    const uint16_t muteval = (mute ? 0 : 1) << mutebit;
-    constexpr uint16_t mutemask = ~(1 << mutebit);
-
-    uint16_t val = ReadRegister(Register::kControl);
-    val = (val & mutemask) | muteval;
-    SetRegister(Register::kControl, val);
-  }
-
-  // Note: maximum volume is 15 (1111), volumes above 15 will be truncated.
-  // Volume is logarithmic.
-  void SetVolume(uint8_t vol) {
-    constexpr uint16_t volume_mask = 0xfff0;
-    uint16_t val = ReadRegister(Register::kThreshold);
-    val = (val & volume_mask) | (vol & 0b1111);
-    SetRegister(Register::kThreshold, val);
-  }
-
-  void Seek() {
-    constexpr int seekbit = 8;
-    constexpr int seekupbit = 9;
-    constexpr uint16_t seekmask = ~(1 << seekbit | 1 << seekupbit);
-    const uint16_t seekval = 1 << 8 | 1 << 9;
-    uint16_t val = ReadRegister(Register::kControl);
-    val |= seekval;
-    SetRegister(Register::kControl, val);
-  }
-
-  // Reports the current channel in kilohertz.
-  uint64_t GetChannel() {
-    const uint16_t val = ReadRegister(Register::kChannel);
-
-    const uint16_t chan = val >> 6;
-    const uint64_t base = BandBaseKhz(Band((val & 0b1100) >> 2));
-    const uint64_t space = SpaceKhz(val & 0b0011);
-
-    return static_cast<uint64_t>(base) + space * chan;
-  }
-
-  void SetChannel(Band band, uint64_t khz) {
-    khz -= BandBaseKhz(band);
-    printf("khzoffset: %lu\n", khz);
-
-    // Use the widest spacing that exactly matches the target frequency,
-    // else 25.
-    uint8_t space_idx = 5;
-    uint64_t space_khz = 0;
-    for (int i : {1, 0, 2, 3}) {
-      uint64_t i_khz = SpaceKhz(i);
-      space_idx = i;
-      space_khz = i_khz;
-      if (!(khz % i_khz)) break;
-    }
-    printf("space_khz: %lu [%d]\n", space_khz, space_idx);
-
-    khz += space_khz / 2;  // Round rather than truncate.
-    khz /= space_khz;
-    printf("chan: %lu\n", khz);
-
-    // Construct the new tune value.
-    uint16_t val =
-        (khz << 6) | (1 << 4) | (static_cast<uint8_t>(band) << 2) | space_idx;
-    printf("setchannel %04x\n", val);
-    SetRegister(Register::kChannel, val);
-  }
-
-  static uint64_t SpaceKhz(uint8_t space_idx) {
-    switch (space_idx) {
-      case 0:
-        return 100;
-      case 1:
-        return 200;
-      case 2:
-        return 50;
-      case 3:
-        return 25;
-    }
-    printf("Illegal space index: %d\n", space_idx);
-    exit(1);
-  }
-
-  static uint64_t BandBaseKhz(Band band) {
-    switch (static_cast<int>(band)) {
-      case 0:
-        return 87000;
-      case 1:
-      case 2:
-        return 76000;
-      case 3:
-        return 65000;
-    }
-    printf("Illegal band index: %d\n", static_cast<int>(band));
-    exit(1);
-  }
-
-  void Tune() {}
-
  private:
   int fd_;
 };
 
+void DumpRegisters(const I2CConnection& conn) {
+  Reg0 reg0 = Reg0::Parse(conn.ReadRegister(Register::kChipId));
+  LOG(INFO) << reg0;
+  Reg2 reg2 = Reg2::Parse(conn.ReadRegister(Register::kControl));
+  LOG(INFO) << reg2;
+  Reg3 reg3 = Reg3::Parse(conn.ReadRegister(Register::kChannel));
+  LOG(INFO) << reg3;
+  Reg5 reg5 = Reg5::Parse(conn.ReadRegister(Register::kVolumeAndSeek));
+  LOG(INFO) << reg5;
+}
+
 void main() {
   auto conn = I2CConnection::Create("/dev/i2c-1");
-  // conn.Reset();
-  // conn.Init();
+  DumpRegisters(conn);
 
-  printf("chipid: %04x\n", conn.ReadRegister(Register::kChipId));
-  printf("control: %04x\n", conn.ReadRegister(Register::kControl));
-  printf("channel: %04x\n", conn.ReadRegister(Register::kChannel));
-  printf("threshold: %04x\n", conn.ReadRegister(Register::kThreshold));
+  Reg2 reg2 = Reg2::Parse(conn.ReadRegister(Register::kControl));
+  reg2.seek = false;
+  reg2.seek_wrap = false;
+  reg2.reference_clock_direct_input = false;
+  reg2.disable_mute = true;
+  conn.SetRegister(Register::kControl, reg2.Serialize());
+  LOG(INFO) << "After adjusting control: "
+            << Reg2::Parse(conn.ReadRegister(Register::kControl));
 
-  conn.SetVolume(10);
-  printf("threshold: %04x\n", conn.ReadRegister(Register::kThreshold));
-  conn.Seek();
-  printf("control: %04x\n", conn.ReadRegister(Register::kControl));
+  Reg5 reg5 = Reg5::Parse(conn.ReadRegister(Register::kVolumeAndSeek));
+  reg5.volume = 15;
+  conn.SetRegister(Register::kVolumeAndSeek, reg5.Serialize());
+  LOG(INFO) << Reg5::Parse(conn.ReadRegister(Register::kVolumeAndSeek));
 
-  printf("channel: %ld\n", conn.GetChannel());
-  conn.SetChannel(Band::kUs, 102700);
-  printf("channel: %ld\n", conn.GetChannel());
+  Reg3 reg3 = Reg3::Parse(conn.ReadRegister(Register::kChannel));
+  reg3.tune = true;
+  reg3.direct_mode = true;
+  conn.SetRegister(Register::kChannel, reg3.Serialize());
+  LOG(INFO) << "After adjusting channel: "
+            << Reg3::Parse(conn.ReadRegister(Register::kChannel));
+  reg3.SetChannel(Reg3::Band::kUs, 91100);
+  conn.SetRegister(Register::kChannel, reg3.Serialize());
+  LOG(INFO) << "Sending: " << reg3;
+  LOG(INFO) << "After adjusting channel: "
+            << Reg3::Parse(conn.ReadRegister(Register::kChannel));
 }
 
 }  // namespace rda5807
