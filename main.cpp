@@ -16,6 +16,8 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 constexpr uint32_t addr_5807_random_access = 0x11;
 
@@ -63,7 +65,7 @@ struct Reg2 {
   bool bass_boost = false;
   bool mono = false;
   bool disable_mute = false;
-  bool dhiz = false;
+  bool output_enable = false;
 
   static Reg2 Parse(uint16_t x) {
     return {
@@ -80,7 +82,7 @@ struct Reg2 {
         .bass_boost = (x & (1 << 12)) != 0,
         .mono = (x & (1 << 13)) != 0,
         .disable_mute = (x & (1 << 14)) != 0,
-        .dhiz = (x & (1 << 15)) != 0,
+        .output_enable = (x & (1 << 15)) != 0,
     };
   }
 
@@ -99,7 +101,7 @@ struct Reg2 {
     x |= bass_boost << 12;
     x |= mono << 13;
     x |= disable_mute << 14;
-    x |= dhiz << 15;
+    x |= output_enable << 15;
     return x;
   }
 
@@ -110,12 +112,12 @@ struct Reg2 {
                  "rds_enable: %d, clock_mode: %d, seek_wrap: %d, seek: %d, "
                  "seek_up: %d, reference_clock_direct_input: %d, "
                  "reference_clock_noncalibrate: %d, bass_boost: %d, mono: "
-                 "%d, disable_mute: %d, dhiz: %d",
+                 "%d, disable_mute: %d, output_enable: %d",
                  reg2.enable, reg2.soft_reset, reg2.new_method, reg2.rds_enable,
                  reg2.clock_mode, reg2.seek_wrap, reg2.seek, reg2.seek_up,
                  reg2.reference_clock_direct_input,
                  reg2.reference_clock_noncalibrate, reg2.bass_boost, reg2.mono,
-                 reg2.disable_mute, reg2.dhiz);
+                 reg2.disable_mute, reg2.output_enable);
   }
 };
 
@@ -342,10 +344,13 @@ void main() {
   DumpRegisters(conn);
 
   Reg2 reg2 = Reg2::Parse(conn.ReadRegister(Register::kControl));
+  reg2.output_enable = true;
   reg2.seek = false;
   reg2.seek_wrap = false;
   reg2.reference_clock_direct_input = false;
   reg2.disable_mute = true;
+  reg2.mono = true;
+  reg2.rds_enable = true;
   conn.SetRegister(Register::kControl, reg2.Serialize());
   LOG(INFO) << "After adjusting control: "
             << Reg2::Parse(conn.ReadRegister(Register::kControl));
@@ -366,6 +371,13 @@ void main() {
   LOG(INFO) << "Sending: " << reg3;
   LOG(INFO) << "After adjusting channel: "
             << Reg3::Parse(conn.ReadRegister(Register::kChannel));
+
+  for (int64_t khz = 90000; khz < 108000; khz += 100) {
+    reg3.SetChannel(Reg3::Band::kUs, khz);
+    conn.SetRegister(Register::kChannel, reg3.Serialize());
+    LOG(INFO) << "Tuning to " << khz << " kHz";
+    absl::SleepFor(absl::Milliseconds(250));
+  }
 }
 
 }  // namespace rda5807

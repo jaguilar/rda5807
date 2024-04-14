@@ -13,7 +13,7 @@ enable_testing()
 
 
 add_executable(rda5807 main.cpp)
-target_link_libraries(rda5807 explain stdc++ absl::str_format absl::check absl::base absl::log)
+target_link_libraries(rda5807 explain stdc++ absl::str_format absl::check absl::base absl::log absl::time)
 
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
